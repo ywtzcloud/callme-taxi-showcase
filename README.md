@@ -139,7 +139,7 @@ Each one is written up with symptom → evidence → root cause → fix → veri
 | [OPERATIONS.md](docs/OPERATIONS.md) | Deploy, rollback, backups, monitoring, testing strategy |
 | [SECURITY.md](SECURITY.md) | What this public repository deliberately does not contain |
 
-Sister product on the same platform: [Mingalarpar Taxi](https://github.com/ywtzcloud/mingalarpar-taxi-showcase).
+Sister product on the same platform: [Mingalarpar Taxi](https://github.com/ywtzdev/mingalarpar-taxi-showcase).
 
 ---
 
