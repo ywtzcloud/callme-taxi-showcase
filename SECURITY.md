@@ -1,17 +1,16 @@
-# Public Showcase Security Policy
+# Security policy for this repository
 
-This repository is intentionally documentation-focused.
+This repository contains **documentation only**: architecture, design notes and an engineering case study.
 
-The following are **not** published here:
+It deliberately does **not** contain:
 
-- production application source
-- API keys, tokens or credentials
-- Firebase production configuration
-- signing keys or signing passwords
-- private deployment configuration
-- customer or driver records
-- raw database exports
-- private operational logs
-- internal backup or migration artifacts
+- application or backend source code;
+- credentials, API keys, signing keys, keystores or service-account files;
+- server addresses, hostnames of private infrastructure or deployment configuration;
+- customer, driver or financial data, database dumps or logs.
 
-If you believe this public showcase contains information that should not be public, report it privately to the repository owner rather than opening a public issue with sensitive details.
+Numbers quoted in the documents (latencies, counts, query rates) are aggregate measurements and identify no person.
+
+The security design of the platform itself is described in [docs/SECURITY_DESIGN.md](docs/SECURITY_DESIGN.md).
+
+If you believe something sensitive was published here by mistake, please open a private security advisory on this repository or contact the owner through GitHub. Do not open a public issue.
