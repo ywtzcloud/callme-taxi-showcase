@@ -1,106 +1,146 @@
-# Call Me Taxi — Engineering Showcase
+# Call Me Taxi: Ride-Hailing Platform Engineering Case Study
 
-> Public engineering case study for a production-oriented native Android taxi platform covering customer booking, driver operations, realtime state, trip settlement, finance workflows and staff tooling.
+> A ride-hailing platform in production in Yangon: a native Android app for customers, drivers and operations staff, with **callme-core**, a self-hosted backend built for it.
+> The backend handles realtime dispatch to about 1,000 drivers, live trip tracking and wallet settlement, and runs on a single 4 vCPU / 8 GB server.
 
-![Android](https://img.shields.io/badge/Android-Native-3DDC84?logo=android&logoColor=white)
-![Kotlin](https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7F52FF?logo=kotlin&logoColor=white)
-![Backend](https://img.shields.io/badge/Backend-Appwrite-FD366E?logo=appwrite&logoColor=white)
-![Realtime](https://img.shields.io/badge/Realtime-Appwrite%20%2B%20FCM-4285F4)
-![Architecture](https://img.shields.io/badge/Architecture-Server--Authoritative-success)
+![Kotlin](https://img.shields.io/badge/Android-Kotlin%20%7C%20Jetpack%20Compose-7F52FF?logo=kotlin&logoColor=white)
+![Node.js](https://img.shields.io/badge/Backend-Node.js%2022%20%7C%20Fastify-339933?logo=node.js&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/Data-PostgreSQL%2016%20%7C%20PostGIS-4169E1?logo=postgresql&logoColor=white)
+![Realtime](https://img.shields.io/badge/Realtime-WebSocket%20%7C%20LISTEN%2FNOTIFY-0A7EA4)
+![Docker](https://img.shields.io/badge/Ops-Docker%20Compose%20%7C%20Caddy%20TLS-2496ED?logo=docker&logoColor=white)
+![Tests](https://img.shields.io/badge/Backend%20tests-45%20automated%20%2B%20live%20dispatch%20drills-success)
 
-## Why this repository exists
+This repository is the **public case study** of the project: architecture, design decisions, security model and the production problems that were diagnosed and fixed. The application and backend source are private. Qualified reviewers can ask for a guided code walkthrough.
 
-This is a **public portfolio showcase**, not the production source repository.
+---
 
-The full application source remains private because it contains proprietary implementation details. This public repository focuses on architecture, engineering decisions, system boundaries and the kinds of production problems the project is designed to solve.
+## Results in numbers
 
-No production credentials, customer data, private infrastructure details, signing material, database dumps or operational logs are published here.
+| | Before | After |
+|---|---|---|
+| Time until the **last** of ~1,090 drivers sees a new order | 3.5 – 4.3 s | **1.0 – 1.2 s** (single bulk write instead of 1,090 inserts) |
+| Orders lost right after a backend deploy (live drill) | 2 of 2 orders reached nobody | **0**: 3 of 3 cold-start and warm drills passed |
+| Idle job-queue queries per minute | ~2,900 | **183** (NOTIFY-driven wake-up + one safety poll) |
+| Chat sync calls per minute per active phone | 27 | **7** (delta sync on foreground) |
+| Phones with a wrong clock (seen: **77 s** ahead) | orders hidden, early accept, GPS refused | handled: every business time is stamped by the server |
+| Hosting | managed Backend-as-a-Service with per-request billing | **one 4 vCPU / 8 GB VPS**, load-tested at the agreed peak of **200 concurrently active drivers** with a 200 ms p95 budget |
 
-## Project at a glance
+---
 
-| Area | Engineering scope |
-|---|---|
-| Client | Native Android, Kotlin, Jetpack Compose, Material 3 |
-| State | ViewModels, coroutines, Flow/StateFlow |
-| Backend | Appwrite Database, Functions, Realtime and Storage |
-| Notifications | Firebase Cloud Messaging |
-| Location | Google Maps and Google Location Services |
-| Roles | Customer, driver and operational staff workflows |
-| Business domains | Booking, dispatch, trip lifecycle, finance, chat, reporting |
-| Release posture | Externalized credentials, security checks and automated quality gates |
+## What the platform does
 
-This showcase reflects the engineering direction of the private **1.7.x** source line.
+- **Customers** book with a pickup only or pickup + destination. Pickup + destination gets a fixed, road-route-based price. Customers follow the driver live on a map and chat with the driver; demands the driver adds (extra cargo, airport, ...) show up live in the price.
+- **Drivers** hear new orders (voice notes included) with a fair accept lock, run the trip meter, settle trips into a wallet and see their earnings.
+- **Operations staff** (Super Admin / Admin / Monitor) review and release customer orders, run a database console, manage users, wallets, pricing, time-of-day boosts and announcements.
 
-## System architecture
+---
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    UI[Jetpack Compose UI] --> VM[ViewModels / State]
-    VM --> R[Repositories & Core APIs]
-    R --> API[Protected Business API]
-    API --> FN[Server Functions]
-    FN --> DB[(Authoritative Data)]
-    FN --> ST[(Storage)]
-    DB --> RT[Realtime State]
-    RT --> R
-    FN --> FCM[Push Events]
-    FCM --> APP[Android Client]
+  subgraph Phones
+    A[Android app<br/>Kotlin + Compose]
+  end
+  subgraph VPS["Single VPS (Docker Compose)"]
+    C[Caddy<br/>TLS, HTTP/2] --> API[api<br/>Fastify: REST, business actions,<br/>storage, console]
+    C --> RT[realtime<br/>WebSocket fan-out]
+    API --> PG[(PostgreSQL 16<br/>+ PostGIS)]
+    W[worker<br/>dispatch, push, schedules] --> PG
+    PG -- "LISTEN/NOTIFY: rt" --> RT
+    PG -- "LISTEN/NOTIFY: jobs" --> W
+  end
+  A -- HTTPS --> C
+  A <-. WebSocket .-> C
+  W -- FCM --> F[Firebase Cloud Messaging] -. push .-> A
+  API -- routes / fares --> O[OpenRouteService]
 ```
 
-The mobile client expresses user intent, but sensitive state transitions are validated by the backend before authoritative data changes.
+- **api**: an HTTP API with document-style endpoints (list/query/create/update), file storage and a single *business action* endpoint. Every action validates the session, role and order state before it writes.
+- **realtime**: WebSocket server. Every committed write is published once through Postgres `NOTIFY`, then filtered per socket by that user's read rules. Coalescing keeps GPS bursts bounded per driver.
+- **worker**: a durable job queue in Postgres (`FOR UPDATE SKIP LOCKED`) that wakes on `NOTIFY`. It runs dispatch waves, push delivery and scheduled maintenance.
+- **migrate**: versioned SQL migrations, applied on every deploy.
+
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
 
 ## Engineering highlights
 
-### Server-authoritative business operations
-Order ownership, trip lifecycle changes, staff actions and transaction-sensitive finance operations are validated on the backend instead of trusting locally cached UI state.
+**Dispatch that is fair and provably fast** ([docs/DISPATCH.md](docs/DISPATCH.md))
+- VIP and free drivers hear an order first and drivers already on a trip 5 s later.
+- Accept stays locked for *voice note + 3 s* (VIP: 0 s). The lock is enforced on the server, so an old app cannot bypass it.
+- A winner's identity stays hidden until every other driver's lock has ended.
+- Distance orders expand 1 → 2 → 3 → 4 km, then go citywide.
+- Customer orders go to **one driver at a time, nearest first**, skipping empty rings instantly.
 
-### Session isolation
-Login/logout and background work can race. The architecture uses session-generation fencing so a late response from an older session cannot silently become authoritative after a new login.
+**Correct under concurrency and bad networks**
+- Accept, cancel and settlement are transactional, with retries on serialization conflicts.
+- Stable operation keys make retried requests idempotent.
+- The realtime socket is re-established with the new session token on login, so a socket opened a moment too early cannot stay anonymous.
 
-### Idempotent transaction-sensitive flows
-Settlement and finance operations are designed around stable operation identity and authoritative records so retried requests do not create duplicate effects.
+**Time you can trust**
+- The server stamps order, alert and GPS times.
+- Phones send *how old* a GPS fix is, measured on their monotonic clock, instead of a wall-clock time.
+- The app learns the server-clock offset from every response.
 
-### Realtime and notification separation
-Realtime synchronization and push notifications serve different purposes. Notification delivery is not treated as proof that a business operation succeeded.
+**Observability built in**
+- The worker logs one line per order event: queued delay, run time, offers created, pushes sent and failed.
+- Push failures are grouped by FCM error code.
+- The driver's live-position feed logs once a minute whether each fix was accepted, or why it was refused.
 
-### Security-oriented release configuration
-Production credentials and signing material are kept outside the source tree. Repository security checks protect against accidentally publishing sensitive local artifacts.
+**Operations**
+- Daily off-site backups (database dump + uploaded files) with a size check after upload and 30-day retention.
+- A 5-minute health monitor alerts to Telegram on downtime, restarts, disk, memory, backup age and p95 latency.
+- One-command upgrades keep the previous release on disk for rollback.
 
-## Product capabilities represented
+**Security by design** ([docs/SECURITY_DESIGN.md](docs/SECURITY_DESIGN.md))
+- Hashed session tokens and device binding.
+- Per-collection read/write policies on every endpoint *and* on the realtime stream.
+- Argon2-protected admin console with an audit log and a read-only SQL role.
+- Secrets live only on the server (never in the app, in git or in chat).
+- Firewall and fail2ban are configured on the host.
 
-- Customer account, booking and trip-history workflows
-- Driver availability, dispatch, accept/start/complete lifecycle
-- Realtime order and location state
-- Meter and fixed-fare workflows
-- Wallet, top-up, withdrawal, redeem and commission flows
-- Server-authoritative trip settlement
-- Private/support chat and operational announcements
-- Admin and monitoring workflows
-- Reports and operational analytics
-- App update and release controls
+---
 
-## Distributed-system concerns
+## Selected production incidents
 
-- stale sessions
-- duplicate requests and retries
-- realtime lag
-- notification delivery differences
-- competing order claims
-- lifecycle race conditions
-- stale local UI state
-- network interruption during multi-step operations
+Each one is written up with symptom → evidence → root cause → fix → verification in [docs/ENGINEERING_CASE_STUDY.md](docs/ENGINEERING_CASE_STUDY.md).
+
+1. **"Some orders don't ring."** A 60-second recipient cache, combined with a token clean-up, wiped the *new* push token of drivers who had just signed in again.
+2. **Orders reached nobody after a deploy.** The cold-start path was reproduced with a live drill against production, using synthetic drivers with real users' push tokens set aside.
+3. **The last drivers heard orders 4 s late.** Per-driver inserts were replaced with one bulk write: 1.0 s end to end.
+4. **The customer saw no car.** A driver phone clock 77 s ahead made every GPS fix look "from the future"; the server refused them all.
+5. **Distance dispatch silently stopped.** A read inside an event transaction saw its own staged write.
+6. **The worker ran out of heap every ~3.5 h.** Idle poll waiters were never released.
+
+---
+
+## Technology
+
+| Layer | Choices |
+|---|---|
+| Android | Kotlin, Jetpack Compose, Material 3, coroutines/Flow, Google Maps SDK, Fused Location, FCM, R8 |
+| Backend | Node.js 22, Fastify, `pg`, firebase-admin, argon2, node:test |
+| Data | PostgreSQL 16 + PostGIS, `pg_stat_statements`, UNLOGGED table for high-rate driver positions |
+| Realtime | WebSocket, Postgres `LISTEN/NOTIFY`, per-socket authorization, write coalescing |
+| Infra | Docker Compose, Caddy (automatic TLS), ufw, fail2ban, systemd timers |
+| External | Firebase Cloud Messaging, OpenRouteService (road routes and fares), Google Maps |
 
 ## Repository guide
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — deeper system boundaries and request flow
-- [`docs/ENGINEERING_CASE_STUDY.md`](docs/ENGINEERING_CASE_STUDY.md) — design problems and engineering responses
-- [`SECURITY.md`](SECURITY.md) — what is intentionally excluded from this public showcase
-- [`LICENSE.md`](LICENSE.md) — portfolio-use terms
+| Document | What it covers |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, data model, request and event flow, deployment |
+| [DISPATCH.md](docs/DISPATCH.md) | Dispatch rules, accept lock, sequential customer dispatch, fares |
+| [ENGINEERING_CASE_STUDY.md](docs/ENGINEERING_CASE_STUDY.md) | Six production incidents, investigated and fixed |
+| [MIGRATION.md](docs/MIGRATION.md) | Moving a live app from a managed BaaS to its own backend without changing user experience |
+| [SECURITY_DESIGN.md](docs/SECURITY_DESIGN.md) | Threat model, authentication, authorization, secrets, host hardening |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Deploy, rollback, backups, monitoring, testing strategy |
+| [SECURITY.md](SECURITY.md) | What this public repository deliberately does not contain |
 
-## Source access
+Sister product on the same platform: [Mingalarpar Taxi](https://github.com/ywtzcloud/mingalarpar-taxi-showcase).
 
-The production source repository is private. Qualified employers or technical reviewers can request temporary read access for a deeper code review.
+---
 
-## Ownership
-
-This showcase describes proprietary engineering work. Publishing this case study does not open-source the underlying application.
+© 2026. Portfolio material, see [LICENSE.md](LICENSE.md). The production application and backend are proprietary.
